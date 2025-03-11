@@ -244,6 +244,13 @@ streamlit run dashboard.py
 }
 ```  
 
+
+### 安装依赖
+
+```
+pip install numpy pandas requests matplotlib scipy seaborn -i https://pypi.tuna.tsinghua.edu.cn/simple
+```
+
 ---
 
 本说明书完整呈现了算法从数据采集到决策输出的全流程技术细节，融合了传统量化模型与前沿机器学习技术。建议结合CME Group的《衍生品市场风险控制手册》进行压力测试参数校准。

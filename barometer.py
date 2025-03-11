@@ -7,17 +7,26 @@ import numpy as np
 import pandas as pd
 import requests
 import matplotlib.pyplot as plt
+import matplotlib.font_manager as fm
 from mpl_toolkits.mplot3d import Axes3D
 from scipy import interpolate
 from datetime import datetime, timedelta
 import seaborn as sns
 import json
+import yfinance as yf
+ 
+# Set the font to a Chinese font
+plt.rcParams['font.sans-serif'] = ['SimHei']  # Use SimHei or another Chinese font
+plt.rcParams['axes.unicode_minus'] = False  # Ensure minus signs are displayed correctly
 
 # ================== 配置模块 ==================
 class Config:
-    ALPHA_VANTAGE_API = "YOUR_API_KEY"
-    GOLD_SYMBOL = "GC=F"
-    NDX_SYMBOL = "^NDX"
+    #ALPHA_VANTAGE_API = "YOUR_API_KEY"
+    ALPHA_VANTAGE_API = "PGG1V2L0G9GLCOPR"
+   # GOLD_SYMBOL = "GC=F"
+   # NDX_SYMBOL = "^NDX"
+    GOLD_SYMBOL = "GLD"
+    NDX_SYMBOL = "QQQ"
     RISK_CONFIG = {
         "max_drawdown": 0.15,
         "vix_thresholds": [15, 25],
@@ -42,23 +51,89 @@ class DataFetcher:
             return None
 
     @staticmethod
-    def generate_vol_surface():
-        """生成模拟波动率曲面"""
-        strikes = np.linspace(17000, 19000, 5)
-        maturities = [1, 7, 30]
-        iv_matrix = np.array([
-            [24.5, 23.1, 22.3],
-            [22.1, 21.0, 20.5],
-            [20.0, 19.5, 19.0],
-            [22.3, 21.2, 20.8],
-            [24.8, 23.5, 22.9]
-        ])
-        return strikes, maturities, iv_matrix
+    def generate_vol_surface(symbol: str = "QQQ", 
+                             num_strikes: int = 20,
+                             max_maturities: int = 5) -> tuple[np.ndarray, list[int], np.ndarray]:
+        """
+        基于yfinance获取真实期权数据生成波动率曲面
+        :param symbol: 标的代码 (默认QQQ)
+        :param num_strikes: 执行价插值点数
+        :param max_maturities: 最大到期日数量限制
+        :return: (strikes, maturities_days, iv_matrix)
+        """
+        try:
+            ticker = yf.Ticker(symbol)
+            print(ticker)
+            # 获取所有到期日并按时间排序 [3,6](@ref)
+            expiry_dates = sorted(ticker.options, 
+                                key=lambda x: datetime.strptime(x, "%Y-%m-%d"))
+            
+            # 限制到期日数量以提升性能 [2](@ref)
+            selected_expiries = expiry_dates[:max_maturities]
+            print(selected_expiries)
+            
+            # 初始化数据结构
+            all_strikes = []
+            iv_data = []
+            
+            # 遍历每个到期日
+            for expiry in selected_expiries:
+                chain = ticker.option_chain(expiry)
+                
+                # 合并看涨/看跌期权 [4](@ref)
+                calls = chain.calls[['strike', 'impliedVolatility']]
+                puts = chain.puts[['strike', 'impliedVolatility']]
+                combined = pd.concat([calls, puts])
+                
+                # 数据清洗 [2](@ref)
+                valid_data = combined[
+                    (combined['impliedVolatility'] > 0.05) & 
+                    (combined['impliedVolatility'] < 1.5)  # 过滤异常波动率
+                ]
+                
+                # 收集数据
+                all_strikes.extend(valid_data['strike'].values)
+                iv_data.append(valid_data)
+            
+            # 生成统一执行价网格 [4](@ref)
+            min_strike = np.min(all_strikes)
+            max_strike = np.max(all_strikes)
+            strikes = np.linspace(min_strike * 0.95, 
+                                 max_strike * 1.05, 
+                                 num_strikes)
+            
+            # 构建IV矩阵
+            iv_matrix = []
+            for expiry, df in zip(selected_expiries, iv_data):
+                # 线性插值填充缺失值 [4](@ref)
+                interp_iv = np.interp(strikes,
+                                     df['strike'].sort_values().values,
+                                     df['impliedVolatility'].sort_values().values,
+                                     left=np.nan, right=np.nan)
+                iv_matrix.append(interp_iv)
+            
+            # 转换为numpy数组并转置 [4](@ref)
+            iv_matrix = np.array(iv_matrix).T
+            
+            # 计算剩余天数 [3](@ref)
+            today = datetime.now()
+            maturities_days = [
+                (datetime.strptime(exp, "%Y-%m-%d") - today).days
+                for exp in selected_expiries
+            ]
+            
+            return strikes, maturities_days, iv_matrix
+            
+        except Exception as e:
+            print(f"波动率曲面生成失败: {str(e)}")
+            return np.array([]), [], np.array([]) 
 
 # ================== 分析计算模块 ==================    
 class Analyzer:
     def __init__(self):
-        self.history = pd.DataFrame(columns=['timestamp', 'gold_pct', 'vix', 'score'])
+        self.history = pd.concat([pd.DataFrame(columns=['timestamp', 'gold_pct', 'vix', 'score'])], ignore_index=True)
+
+       # self.history = pd.DataFrame(columns=['timestamp', 'gold_pct', 'vix', 'score'])
         
     def calculate_gold_factor(self, gold_pct):
         """计算黄金动量因子"""
@@ -178,7 +253,7 @@ if __name__ == "__main__":
             'vix': current_vix,
             'score': composite_score
         }
-        analyzer.history = analyzer.history.append(new_row, ignore_index=True)
+        analyzer.history = pd.concat([analyzer.history, pd.DataFrame([new_row])], ignore_index=True)
         
         # 风险检查
         risk_level = risk_mgr.check_risk(composite_score, current_vix)
